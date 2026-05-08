@@ -86,6 +86,59 @@ static SDL_GPUShader *CompileHLSL(SDL_GPUDevice *Device, const char *Source, SDL
 	return Shader;
 }
 
+static SDL_GPUGraphicsPipeline *CreatePipeline(SDL_GPUDevice *Device, SDL_Window *Window, const char *ShaderPath)
+{
+	SDL_GPUGraphicsPipeline *Result = 0;
+
+	struct ReadFileResult ShaderSource = ReadEntireFile(ShaderPath);
+	if (!ShaderSource.Memory)
+	{
+		return 0;
+	}
+
+	SDL_GPUShader *VertexShader = CompileHLSL(Device, (const char *)ShaderSource.Memory, SDL_SHADERCROSS_SHADERSTAGE_VERTEX, "VsMain");
+	SDL_GPUShader *FragmentShader = CompileHLSL(Device, (const char *)ShaderSource.Memory, SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT, "PsMain");
+
+	if (VertexShader && FragmentShader)
+	{
+		SDL_GPUColorTargetDescription ColorTargetDescription = {
+			.format = SDL_GetGPUSwapchainTextureFormat(Device, Window),
+			.blend_state.color_write_mask = 0xF,
+		};
+
+		SDL_GPUGraphicsPipelineCreateInfo PipelineCreateInfo = {
+			.vertex_shader = VertexShader,
+			.fragment_shader = FragmentShader,
+			.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+
+			.vertex_input_state.num_vertex_buffers = 0,
+			.vertex_input_state.num_vertex_attributes = 0,
+
+			.target_info.num_color_targets = 1,
+			.target_info.color_target_descriptions = &ColorTargetDescription,
+		};
+
+		Result = SDL_CreateGPUGraphicsPipeline(Device, &PipelineCreateInfo);
+		if (!Result)
+		{
+			SDL_Log("%s", SDL_GetError());
+		}
+	}
+
+	if (VertexShader)
+	{
+		SDL_ReleaseGPUShader(Device, VertexShader);
+	}
+	if (FragmentShader)
+	{
+		SDL_ReleaseGPUShader(Device, FragmentShader);
+	}
+
+	FreeFileMemory(ShaderSource);
+
+	return Result;
+}
+
 int main(void)
 {
 	if (!SDL_Init(SDL_INIT_VIDEO))
@@ -118,54 +171,15 @@ int main(void)
 		return 1;
 	}
 
-	struct ReadFileResult ShaderSource = ReadEntireFile("Shaders/Mesh.hlsl");
-	Assert(ShaderSource.Memory);
+	const char *Shader = "Shaders/Mesh.hlsl";
+	SDL_GPUGraphicsPipeline *Pipeline = CreatePipeline(Device, Window, Shader);
 
-	SDL_GPUShader *VertexShader = CompileHLSL(Device, (const char *)ShaderSource.Memory, SDL_SHADERCROSS_SHADERSTAGE_VERTEX, "VsMain");
-	if (!VertexShader)
+	SDL_Time LastShaderWriteTime = 0;
+	SDL_PathInfo PathInfo;
+	if (SDL_GetPathInfo(Shader, &PathInfo))
 	{
-		SDL_Log("%s", SDL_GetError());
-
-		return 1;
+		LastShaderWriteTime = PathInfo.modify_time;
 	}
-
-	SDL_GPUShader *FragmentShader = CompileHLSL(Device, (const char *)ShaderSource.Memory, SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT, "PsMain");
-	if (!FragmentShader)
-	{
-		SDL_Log("%s", SDL_GetError());
-
-		return 1;
-	}
-
-	FreeFileMemory(ShaderSource);
-
-	SDL_GPUColorTargetDescription ColorTargetDescription = {
-		.format = SDL_GetGPUSwapchainTextureFormat(Device, Window),
-		.blend_state.color_write_mask = 0xF,
-	};
-
-	SDL_GPUGraphicsPipelineCreateInfo PipelineCreateInfo = {
-		.vertex_shader = VertexShader,
-		.fragment_shader = FragmentShader,
-		.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-
-		.vertex_input_state.num_vertex_buffers = 0,
-		.vertex_input_state.num_vertex_attributes = 0,
-
-		.target_info.num_color_targets = 1,
-		.target_info.color_target_descriptions = &ColorTargetDescription,
-	};
-
-	SDL_GPUGraphicsPipeline *Pipeline = SDL_CreateGPUGraphicsPipeline(Device, &PipelineCreateInfo);
-	if (!Pipeline)
-	{
-		SDL_Log("%s", SDL_GetError());
-
-		return 1;
-	}
-
-	SDL_ReleaseGPUShader(Device, VertexShader);
-	SDL_ReleaseGPUShader(Device, FragmentShader);
 
 	for (;;) 
 	{
@@ -177,6 +191,24 @@ int main(void)
 			{
 				return 0;
 			}
+		}
+
+		if (SDL_GetPathInfo(Shader, &PathInfo) && (PathInfo.modify_time > LastShaderWriteTime))
+		{
+			SDL_Delay(10);
+			SDL_GPUGraphicsPipeline *NewPipleine = CreatePipeline(Device, Window, Shader);
+
+			if (NewPipleine)
+			{
+				if (Pipeline)
+				{
+					SDL_ReleaseGPUGraphicsPipeline(Device, Pipeline);
+				}
+
+				Pipeline = NewPipleine;
+			}
+
+			LastShaderWriteTime = PathInfo.modify_time;
 		}
 
 		SDL_GPUCommandBuffer *CommandBuffer = SDL_AcquireGPUCommandBuffer(Device);
@@ -202,10 +234,14 @@ int main(void)
 		};
 
 		SDL_GPURenderPass *RenderPass = SDL_BeginGPURenderPass(CommandBuffer, &ColorTarget, 1, 0);
-		if (RenderPass)
+		if (RenderPass && Pipeline)
 		{
 			SDL_BindGPUGraphicsPipeline(RenderPass, Pipeline);
 			SDL_DrawGPUPrimitives(RenderPass, 3, 1, 0, 0);
+		}
+
+		if (RenderPass)
+		{
 			SDL_EndGPURenderPass(RenderPass);
 		}
 
