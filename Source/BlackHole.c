@@ -428,10 +428,13 @@ int main(void)
 			TTF_GPUAtlasDrawSequence *Sequence = TTF_GetGPUTextDrawData(Text);
 			while (Sequence)
 			{
+				Assert((unsigned int)DrawCommandCount < ArrayCount(DrawCommands));
 				DrawCommands[DrawCommandCount++] = (struct TextDrawCommand){ Sequence, Text, Vertices, Indices };
 
 				for (int Vertex = 0; Vertex < Sequence->num_vertices; Vertex++)
 				{
+					Assert(Vertices < (int)(16 * MB / sizeof(struct Vertex)));
+
 					VertexDestination[Vertices + Vertex] = (struct Vertex){ 
 						Sequence->xy[Vertex].x, Sequence->xy[Vertex].y, 0.0f,
 						R, G, B, A,
