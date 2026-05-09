@@ -13,7 +13,15 @@
 #define KB (1024ULL)
 #define MB (1024ULL * KB)
 
-static TTF_Text *TextListHead = 0;
+static TTF_TextEngine *TextEngine;
+static SDL_GPUTexture *MagicPixel;
+
+static TTF_Font *DebugFont;
+
+static struct Vertex *VertexDestination;
+static Uint32 *IndexDestination;
+static int Vertices;
+static int Indices;
 
 struct ReadFileResult
 {
@@ -34,13 +42,17 @@ struct Pipeline
 	SDL_Time LastWriteTime;
 };
 
-struct TextDrawCommand
+struct UIDrawCommand
 {
-	TTF_GPUAtlasDrawSequence *Sequence;
-	TTF_Text *Text;
+	SDL_GPUTexture *Texture;
 	int VertexOffset;
 	int IndexOffset;
+	int NumIndices;
+	float X, Y;
 };
+
+static struct UIDrawCommand DrawCommands[256];
+static int DrawCommandCount;
 
 static struct ReadFileResult ReadEntireFile(const char *Path)
 {
@@ -213,21 +225,113 @@ static SDL_GPUGraphicsPipeline *CreatePipeline(SDL_GPUDevice *Device, SDL_Window
 	return Result;
 }
 
-static void AppendText(TTF_Text *Text)
+/// a magic pixel is 1x1 white texture
+static SDL_GPUTexture *CreateMagicPixel(SDL_GPUDevice *Device)
 {
-	SDL_PropertiesID Properties = TTF_GetTextProperties(Text);
-	SDL_SetPointerProperty(Properties, "Next", TextListHead);
-	TextListHead = Text;
+	SDL_GPUTexture *MagicPixel = SDL_CreateGPUTexture(Device, &(SDL_GPUTextureCreateInfo){
+		.type = SDL_GPU_TEXTURETYPE_2D,
+		.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+		.width = 1, .height = 1,
+		.layer_count_or_depth = 1,
+		.num_levels = 1,
+		.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+	});
+
+	SDL_GPUTransferBuffer *TransferBuffer = SDL_CreateGPUTransferBuffer(Device, &(SDL_GPUTransferBufferCreateInfo){
+		.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+		.size = 4,
+	});
+
+	*(Uint32 *)SDL_MapGPUTransferBuffer(Device, TransferBuffer, false) = 0xFFFFFFFF;
+	SDL_UnmapGPUTransferBuffer(Device, TransferBuffer);
+
+	SDL_GPUCommandBuffer *CommandBuffer = SDL_AcquireGPUCommandBuffer(Device);
+	SDL_GPUCopyPass *CopyPass = SDL_BeginGPUCopyPass(CommandBuffer);
+	SDL_UploadToGPUTexture(CopyPass, 
+		&(SDL_GPUTextureTransferInfo){ .transfer_buffer = TransferBuffer }, 
+		&(SDL_GPUTextureRegion){ .texture = MagicPixel, .w = 1, .h = 1, .d = 1 }, false);
+	SDL_EndGPUCopyPass(CopyPass);
+	SDL_SubmitGPUCommandBuffer(CommandBuffer);
+	SDL_ReleaseGPUTransferBuffer(Device, TransferBuffer);
+
+	return MagicPixel;
 }
 
-/// use this function instead of TTF_SetTextPosition for positioning TTF_Text.
-/// SDL_ttf's TTF_SetTextPosition bakes the position into vertex data and also clips glyps against the unoffset text width, causing the text to get cut off and
-/// this function is the workaround against this issue.
-static void SetTextPosition(TTF_Text *Text, int X, int Y)
+static void DrawPanel(float X, float Y, float W, float H, SDL_FColor Color)
 {
-	SDL_PropertiesID Properties = TTF_GetTextProperties(Text);
-	SDL_SetNumberProperty(Properties, "X", X);
-	SDL_SetNumberProperty(Properties, "Y", Y);
+	Assert((unsigned int)DrawCommandCount < ArrayCount(DrawCommands));
+	Assert(Vertices + 4 < (int)(16 * MB / sizeof(struct Vertex)));
+
+	DrawCommands[DrawCommandCount++] = (struct UIDrawCommand){
+		.Texture = MagicPixel,
+		.VertexOffset = Vertices,
+		.IndexOffset = Indices,
+		.NumIndices = 6,
+		.X = 0, .Y = 0,
+	};
+
+	VertexDestination[Vertices + 0] = (struct Vertex){ X,     -Y,     0, Color.r, Color.g, Color.b, Color.a, 0, 0 };
+    VertexDestination[Vertices + 1] = (struct Vertex){ X + W, -Y,     0, Color.r, Color.g, Color.b, Color.a, 1, 0 };
+    VertexDestination[Vertices + 2] = (struct Vertex){ X + W, -(Y+H), 0, Color.r, Color.g, Color.b, Color.a, 1, 1 };
+    VertexDestination[Vertices + 3] = (struct Vertex){ X,     -(Y+H), 0, Color.r, Color.g, Color.b, Color.a, 0, 1 };
+
+    IndexDestination[Indices + 0] = Vertices + 0;
+    IndexDestination[Indices + 1] = Vertices + 1;
+    IndexDestination[Indices + 2] = Vertices + 2;
+    IndexDestination[Indices + 3] = Vertices + 0;
+    IndexDestination[Indices + 4] = Vertices + 2;
+    IndexDestination[Indices + 5] = Vertices + 3;
+
+    Vertices += 4;
+    Indices += 6;
+}
+
+static void DrawText(TTF_Font *Font, const char *String, float X, float Y, SDL_FColor Color)
+{
+    TTF_Text *Text = TTF_CreateText(TextEngine, Font, String, 0);
+
+    TTF_SetTextColorFloat(Text, Color.r, Color.g, Color.b, Color.a);
+
+    TTF_GPUAtlasDrawSequence *Sequence = TTF_GetGPUTextDrawData(Text);
+    while (Sequence)
+    {
+        Assert((unsigned int)DrawCommandCount < ArrayCount(DrawCommands));
+        Assert(Vertices + Sequence->num_vertices < (int)(16 * MB / sizeof(struct Vertex)));
+
+        DrawCommands[DrawCommandCount++] = (struct UIDrawCommand){
+            .Texture = Sequence->atlas_texture,
+            .VertexOffset = Vertices,
+            .IndexOffset = Indices,
+            .NumIndices = Sequence->num_indices,
+            .X = X, .Y = Y,
+        };
+
+        for (int i = 0; i < Sequence->num_vertices; i++)
+        {
+            VertexDestination[Vertices + i] = (struct Vertex){
+                Sequence->xy[i].x, Sequence->xy[i].y, 0.0f,
+                Color.r, Color.g, Color.b, Color.a,
+                Sequence->uv[i].x, Sequence->uv[i].y,
+            };
+        }
+        for (int i = 0; i < Sequence->num_indices; i++)
+        {
+            IndexDestination[Indices + i] = Sequence->indices[i];
+        }
+
+        Vertices += Sequence->num_vertices;
+        Indices += Sequence->num_indices;
+        Sequence = Sequence->next;
+    }
+
+    TTF_DestroyText(Text);
+}
+
+static void UpdateAndDraw(void)
+{
+	DrawPanel(50, 50, 400, 200, RED);
+	DrawText(DebugFont, "hello", 100, 0, WHITE);
+	DrawText(DebugFont, "HI", 100, -100, WHITE);
 }
 
 int main(void)
@@ -296,7 +400,7 @@ int main(void)
 			{ .location = 2, .buffer_slot = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, .offset = sizeof(float) * 7 },
 		};
 
-		PipelineSetShader(Pipeline, "Shaders/Text.hlsl");
+		PipelineSetShader(Pipeline, "Shaders/UI.hlsl");
 		PipelineSetFormat(Pipeline, &VertexBufferDescription, 1, VertexAttributes, 3);
 		PipelineSetBlend(Pipeline, true);
 	}
@@ -318,47 +422,42 @@ int main(void)
 		}
 	}
 
-	SDL_GPUBuffer *TextVertexBuffer = SDL_CreateGPUBuffer(Device, &(SDL_GPUBufferCreateInfo){
+	SDL_GPUBuffer *UIVertexBuffer = SDL_CreateGPUBuffer(Device, &(SDL_GPUBufferCreateInfo){
 		.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
 		.size = 16 * MB,
 	});
 
-	SDL_GPUBuffer *TextIndexBuffer = SDL_CreateGPUBuffer(Device, &(SDL_GPUBufferCreateInfo){
+	SDL_GPUBuffer *UIIndexBuffer = SDL_CreateGPUBuffer(Device, &(SDL_GPUBufferCreateInfo){
 		.usage = SDL_GPU_BUFFERUSAGE_INDEX,
 		.size = 16 * MB,
 	});
 
-	SDL_GPUTransferBuffer *TextTransferBuffer = SDL_CreateGPUTransferBuffer(Device, &(SDL_GPUTransferBufferCreateInfo){
+	SDL_GPUTransferBuffer *UITransferBuffer = SDL_CreateGPUTransferBuffer(Device, &(SDL_GPUTransferBufferCreateInfo){
 		.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
 		.size = 16 * MB + 16 * MB,
 	});
 
-	SDL_GPUSampler *TextSampler = SDL_CreateGPUSampler(Device, &(SDL_GPUSamplerCreateInfo){
+	SDL_GPUSampler *UISampler = SDL_CreateGPUSampler(Device, &(SDL_GPUSamplerCreateInfo){
 		.min_filter = SDL_GPU_FILTER_LINEAR,
 		.mag_filter = SDL_GPU_FILTER_LINEAR,
 	});
 
-	TTF_Font *Font = TTF_OpenFont("Assets/DebugFont.ttf", 64.0f);
-	if (!Font)
+	MagicPixel = CreateMagicPixel(Device);
+
+	DebugFont = TTF_OpenFont("Assets/DebugFont.ttf", 64.0f);
+	if (!DebugFont)
 	{
 		SDL_Log("%s", SDL_GetError());
 
 		return 1;
 	}
 
-	TTF_TextEngine *TextEngine = TTF_CreateGPUTextEngine(Device);
-
-	TTF_Text *TitleText = TTF_CreateText(TextEngine, Font, "hello", 0);
-	SetTextPosition(TitleText, 100, 0);
-	AppendText(TitleText);
-
-	TTF_Text *OtherText = TTF_CreateText(TextEngine, Font, "HI", 0);
-	SetTextPosition(OtherText, 100, -100);
-	AppendText(OtherText);
+	TextEngine = TTF_CreateGPUTextEngine(Device);
 
 	for (;;) 
 	{
 		SDL_Event Event;
+
 
 		while (SDL_PollEvent(&Event))
 		{
@@ -412,60 +511,26 @@ int main(void)
 			continue;
 		}
 
-		Uint8 *TransferMap = SDL_MapGPUTransferBuffer(Device, TextTransferBuffer, 1);
-		struct Vertex *VertexDestination = (struct Vertex *)TransferMap;
-		Uint32 *IndexDestination = (Uint32 *)(TransferMap + 16 * MB);
+		Uint8 *TransferMap = SDL_MapGPUTransferBuffer(Device, UITransferBuffer, 1);
+		
+		VertexDestination = (struct Vertex *)TransferMap;
+		IndexDestination = (Uint32 *)(TransferMap + 16 * MB);
 
-		int Vertices = 0, Indices = 0;
-		struct TextDrawCommand DrawCommands[256];
-		int DrawCommandCount = 0;
+		Vertices = 0, Indices = 0;
+		DrawCommandCount = 0;
 
-		for (TTF_Text *Text = TextListHead; Text; )
-		{
-			float R, G, B, A;
-			TTF_GetTextColorFloat(Text, &R, &G, &B, &A);
-
-			TTF_GPUAtlasDrawSequence *Sequence = TTF_GetGPUTextDrawData(Text);
-			while (Sequence)
-			{
-				Assert((unsigned int)DrawCommandCount < ArrayCount(DrawCommands));
-				DrawCommands[DrawCommandCount++] = (struct TextDrawCommand){ Sequence, Text, Vertices, Indices };
-
-				for (int Vertex = 0; Vertex < Sequence->num_vertices; Vertex++)
-				{
-					Assert(Vertices < (int)(16 * MB / sizeof(struct Vertex)));
-
-					VertexDestination[Vertices + Vertex] = (struct Vertex){ 
-						Sequence->xy[Vertex].x, Sequence->xy[Vertex].y, 0.0f,
-						R, G, B, A,
-						Sequence->uv[Vertex].x, Sequence->uv[Vertex].y,
-					};
-				}
-				for (int Index = 0; Index < Sequence->num_indices; Index++)
-				{
-					IndexDestination[Indices + Index] = Sequence->indices[Index];
-				}
-
-				Vertices += Sequence->num_vertices;
-				Indices += Sequence->num_indices;
-				Sequence = Sequence->next;
-			}
-
-			SDL_PropertiesID Properties = TTF_GetTextProperties(Text);
-			Text = SDL_GetPointerProperty(Properties, "Next", 0);
-		}
-		SDL_UnmapGPUTransferBuffer(Device, TextTransferBuffer);
-
+		UpdateAndDraw();
+		
 		if (Vertices > 0)
 		{
 			SDL_GPUCopyPass *CopyPass = SDL_BeginGPUCopyPass(CommandBuffer);
 			SDL_UploadToGPUBuffer(CopyPass, 
-				&(SDL_GPUTransferBufferLocation){ .transfer_buffer = TextTransferBuffer, .offset = 0 }, 
-				&(SDL_GPUBufferRegion){ .buffer = TextVertexBuffer, .offset = 0, .size = Vertices * sizeof(struct Vertex) }, true);
+				&(SDL_GPUTransferBufferLocation){ .transfer_buffer = UITransferBuffer, .offset = 0 }, 
+				&(SDL_GPUBufferRegion){ .buffer = UIVertexBuffer, .offset = 0, .size = Vertices * sizeof(struct Vertex) }, true);
 			
 			SDL_UploadToGPUBuffer(CopyPass, 
-				&(SDL_GPUTransferBufferLocation){ .transfer_buffer = TextTransferBuffer, .offset = 16 * MB }, 
-				&(SDL_GPUBufferRegion){ .buffer = TextIndexBuffer, .offset = 0, .size = Indices * sizeof(Uint32) }, true);
+				&(SDL_GPUTransferBufferLocation){ .transfer_buffer = UITransferBuffer, .offset = 16 * MB }, 
+				&(SDL_GPUBufferRegion){ .buffer = UIIndexBuffer, .offset = 0, .size = Indices * sizeof(Uint32) }, true);
 
 			SDL_EndGPUCopyPass(CopyPass);
 		}
@@ -490,35 +555,31 @@ int main(void)
 			{
 				SDL_BindGPUGraphicsPipeline(RenderPass, Pipelines[1].Handle);
 				SDL_BindGPUVertexBuffers(RenderPass, 0, &(SDL_GPUBufferBinding){
-					.buffer = TextVertexBuffer,
+					.buffer = UIVertexBuffer,
 					.offset = 0,
 				}, 1);
 				SDL_BindGPUIndexBuffer(RenderPass, &(SDL_GPUBufferBinding){
-					.buffer = TextIndexBuffer,
+					.buffer = UIIndexBuffer,
 					.offset = 0,
 				}, SDL_GPU_INDEXELEMENTSIZE_32BIT);
 
 				for (int i = 0; i < DrawCommandCount; i++)
 				{
-					struct TextDrawCommand DrawCommand = DrawCommands[i];
-
-					SDL_PropertiesID Properties = TTF_GetTextProperties(DrawCommand.Text);
-					float X = (float)SDL_GetNumberProperty(Properties, "X", 0);
-					float Y = (float)SDL_GetNumberProperty(Properties, "Y", 0);
+					struct UIDrawCommand DrawCommand = DrawCommands[i];
 
 					struct Matrix4x4 Uniforms[2] = {
 						OrthographicMatrix(0.0f, 1280.0f, -720.0f, 0.0f, -1.0f, 1.0f),
-						TranslationMatrix(Vector3(X, Y, 1.0f)),
+						TranslationMatrix(Vector3(DrawCommand.X, DrawCommand.Y, 1.0f)),
 					};
 
 					SDL_PushGPUVertexUniformData(CommandBuffer, 0, Uniforms, sizeof(Uniforms));
 
 					SDL_BindGPUFragmentSamplers(RenderPass, 0, &(SDL_GPUTextureSamplerBinding){
-						.texture = DrawCommand.Sequence->atlas_texture,
-						.sampler = TextSampler,
+						.texture = DrawCommand.Texture,
+						.sampler = UISampler,
 					}, 1);
 
-					SDL_DrawGPUIndexedPrimitives(RenderPass, DrawCommand.Sequence->num_indices, 1, DrawCommand.IndexOffset, DrawCommand.VertexOffset, 0);
+					SDL_DrawGPUIndexedPrimitives(RenderPass, DrawCommand.NumIndices, 1, DrawCommand.IndexOffset, DrawCommand.VertexOffset, 0);
 				}
 			}
 			SDL_EndGPURenderPass(RenderPass);
