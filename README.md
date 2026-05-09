@@ -5,3 +5,5 @@ Other than a C compiler, Make and pkg-config you need to have [SDL3](https://git
 make 
 ./BlackHole
 ```
+
+<img width="1280" height="720" alt="image" src="https://github.com/user-attachments/assets/b3ca85b1-9ee1-4475-919c-dacdbffdffd5" />
