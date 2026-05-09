@@ -1,2 +1,4 @@
 # the binary
 BlackHole
+# shader cache
+*.spv

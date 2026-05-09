@@ -76,34 +76,6 @@ struct UIDrawCommand
 static struct UIDrawCommand DrawCommands[256];
 static int DrawCommandCount;
 
-static struct ReadFileResult ReadEntireFile(const char *Path)
-{
-	struct ReadFileResult Result = {0};
-
-	Uint64 MemorySize = 0;
-	void *Memory = SDL_LoadFile(Path, &MemorySize);
-
-	if (Memory)
-	{
-		Result.Memory = Memory;
-		Result.MemorySize = MemorySize;
-	}
-	else
-	{
-		SDL_Log("%s", SDL_GetError());
-	}
-
-	return Result;
-}
-
-static void FreeFileMemory(struct ReadFileResult File)
-{
-	if (File.Memory)
-	{
-		SDL_free(File.Memory);
-	}
-}
-
 // these are purely for readability and do not have any functionality behind them
 static void BeginPipeline(void) {}
 static void EndPipeline(void) {}
@@ -132,30 +104,81 @@ static void PipelineSetTargetFormat(struct Pipeline *Pipeline, SDL_GPUTextureFor
 	Pipeline->ColorTargetFormat = Format;
 }
 
-static SDL_GPUShader *CompileHLSL(SDL_GPUDevice *Device, const char *Source, SDL_ShaderCross_ShaderStage Stage, const char *Entrypoint)
+static SDL_GPUShader *CompileHLSL(SDL_GPUDevice *Device, const char *Path, SDL_ShaderCross_ShaderStage Stage, const char *Entrypoint)
 {
-	SDL_ShaderCross_HLSL_Info HLSL = {
-		.source = Source,
-		.entrypoint = Entrypoint,
-		.shader_stage = Stage,
-	};
+	Uint64 StartTime = SDL_GetPerformanceCounter();
+	
+	char CachePath[256];
+	SDL_snprintf(CachePath, sizeof(CachePath), "%s.%s.spv", Path, Entrypoint);
 
+	SDL_PathInfo HLSLInfo, CacheInfo;
+	bool CacheValid = false;
+
+	if (SDL_GetPathInfo(Path, &HLSLInfo) && SDL_GetPathInfo(CachePath, &CacheInfo))
+	{
+		if (CacheInfo.modify_time >= HLSLInfo.modify_time)
+		{
+			CacheValid = true;
+		}
+	}
+
+	void *SPIRV = 0;
 	Uint64 SPIRVSize = 0;
-	void *SPIRV = SDL_ShaderCross_CompileSPIRVFromHLSL(&HLSL, &SPIRVSize);
+
+	if (CacheValid)
+	{
+		// fast path, load the compiled binary blob
+		SPIRV = SDL_LoadFile(CachePath, &SPIRVSize);
+	}
+
 	if (!SPIRV)
 	{
-		SDL_Log("%s", SDL_GetError());
+		// slow path, compile hlsl
+		Uint64 HLSLSize = 0;
+		void *HLSLSource = SDL_LoadFile(Path, &HLSLSize);
 
+		if (!HLSLSize)
+		{
+			return 0;
+		}
+
+		SDL_ShaderCross_HLSL_Info HLSL = {
+			.source = (const char *)HLSLSource,
+			.entrypoint = Entrypoint,
+			.shader_stage = Stage,
+		};
+
+		SPIRV = SDL_ShaderCross_CompileSPIRVFromHLSL(&HLSL, &SPIRVSize);
+		SDL_free(HLSLSource);
+
+		if (SPIRV)
+		{
+			// save the binary blob so next time it does not need to be compiled and hits the path above
+			SDL_IOStream *IO = SDL_IOFromFile(CachePath, "wb");
+
+			if (IO)
+			{
+				SDL_WriteIO(IO, SPIRV, SPIRVSize);
+				SDL_CloseIO(IO);
+			}
+		}
+		else
+		{
+			SDL_Log("%s", SDL_GetError());
+		}
+	}
+
+	if (!SPIRV)
+	{
 		return 0;
 	}
 
 	SDL_ShaderCross_GraphicsShaderMetadata *Metadata = SDL_ShaderCross_ReflectGraphicsSPIRV(SPIRV, SPIRVSize, 0);
+	
 	if (!Metadata)
 	{
-		SDL_Log("%s", SDL_GetError());
-
 		SDL_free(SPIRV);
-
+		
 		return 0;
 	}
 
@@ -171,10 +194,10 @@ static SDL_GPUShader *CompileHLSL(SDL_GPUDevice *Device, const char *Source, SDL
 	SDL_free(Metadata);
 	SDL_free(SPIRV);
 
-	if (!Shader)
-	{
-		SDL_Log("%s", SDL_GetError());
-	}
+	Uint64 EndTime = SDL_GetPerformanceCounter();
+	double ElapsedMS = (double)(EndTime - StartTime) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+
+	SDL_Log("%s:%s took %.2f ms", Path, Entrypoint, ElapsedMS);
 
 	return Shader;
 }
@@ -188,14 +211,8 @@ static SDL_GPUGraphicsPipeline *CreatePipeline(SDL_GPUDevice *Device, SDL_Window
 
 	SDL_GPUGraphicsPipeline *Result = 0;
 
-	struct ReadFileResult ShaderSource = ReadEntireFile(Pipeline->Shader);
-	if (!ShaderSource.Memory)
-	{
-		return 0;
-	}
-
-	SDL_GPUShader *VertexShader = CompileHLSL(Device, (const char *)ShaderSource.Memory, SDL_SHADERCROSS_SHADERSTAGE_VERTEX, "VsMain");
-	SDL_GPUShader *FragmentShader = CompileHLSL(Device, (const char *)ShaderSource.Memory, SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT, "PsMain");
+	SDL_GPUShader *VertexShader = CompileHLSL(Device, Pipeline->Shader, SDL_SHADERCROSS_SHADERSTAGE_VERTEX, "VsMain");
+	SDL_GPUShader *FragmentShader = CompileHLSL(Device, Pipeline->Shader, SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT, "PsMain");
 
 	if (VertexShader && FragmentShader)
 	{
@@ -248,8 +265,6 @@ static SDL_GPUGraphicsPipeline *CreatePipeline(SDL_GPUDevice *Device, SDL_Window
 	{
 		SDL_ReleaseGPUShader(Device, FragmentShader);
 	}
-
-	FreeFileMemory(ShaderSource);
 
 	return Result;
 }
