@@ -13,6 +13,8 @@
 #define KB (1024ULL)
 #define MB (1024ULL * KB)
 
+static TTF_Text *TextListHead = 0;
+
 struct ReadFileResult
 {
 	void *Memory;
@@ -211,6 +213,13 @@ static SDL_GPUGraphicsPipeline *CreatePipeline(SDL_GPUDevice *Device, SDL_Window
 	return Result;
 }
 
+static void AppendText(TTF_Text *Text)
+{
+	SDL_PropertiesID Properties = TTF_GetTextProperties(Text);
+	SDL_SetPointerProperty(Properties, "Next", TextListHead);
+	TextListHead = Text;
+}
+
 /// use this function instead of TTF_SetTextPosition for positioning TTF_Text.
 /// SDL_ttf's TTF_SetTextPosition bakes the position into vertex data and also clips glyps against the unoffset text width, causing the text to get cut off and
 /// this function is the workaround against this issue.
@@ -340,16 +349,12 @@ int main(void)
 	TTF_TextEngine *TextEngine = TTF_CreateGPUTextEngine(Device);
 
 	TTF_Text *TitleText = TTF_CreateText(TextEngine, Font, "hello", 0);
-
-	// TTF_Text *SubText = TTF_CreateText(TextEngine, Font, "hi!", 0);
-	// TTF_SetTextColorFloat(SubText, 0.5f, 1.0f, 0.5f, 1.0f);
-
 	SetTextPosition(TitleText, 100, 0);
+	AppendText(TitleText);
 
-	// TODO: this is a bit too manual.
-	TTF_Text *TextData[] = {
-		TitleText,// SubText
-	};
+	TTF_Text *OtherText = TTF_CreateText(TextEngine, Font, "HI", 0);
+	SetTextPosition(OtherText, 100, -100);
+	AppendText(OtherText);
 
 	for (;;) 
 	{
@@ -415,9 +420,8 @@ int main(void)
 		struct TextDrawCommand DrawCommands[256];
 		int DrawCommandCount = 0;
 
-		for (unsigned int i = 0; i < ArrayCount(TextData); i++)
+		for (TTF_Text *Text = TextListHead; Text; )
 		{
-			TTF_Text *Text = TextData[i];
 			float R, G, B, A;
 			TTF_GetTextColorFloat(Text, &R, &G, &B, &A);
 
@@ -443,6 +447,9 @@ int main(void)
 				Indices += Sequence->num_indices;
 				Sequence = Sequence->next;
 			}
+
+			SDL_PropertiesID Properties = TTF_GetTextProperties(Text);
+			Text = SDL_GetPointerProperty(Properties, "Next", 0);
 		}
 		SDL_UnmapGPUTransferBuffer(Device, TextTransferBuffer);
 
