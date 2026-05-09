@@ -103,10 +103,5 @@ float4 PsMain(VsOutput Input) : SV_Target0
         }
     }
     
-    float3 FinalColor = DiskColor;
-    
-    FinalColor = FinalColor / (1.0 + FinalColor); 
-    FinalColor = pow(FinalColor, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-
-    return float4(FinalColor, 1.0);
+    return float4(DiskColor, 1.0);
 }
