@@ -4,6 +4,8 @@
 
 #include "Math.h"
 
+#define MIPS 6
+
 #define Unused(X) (void)X;
 #define Assert(X) if (!(X)) { *(int *)0 = 0; }
 #define ArrayCount(X) (sizeof(X) / sizeof((X)[0]))
@@ -30,6 +32,13 @@ static float MouseX = 0, MouseY = 0;
 static float DragOffsetX = 0, DragOffsetY = 0;
 static bool MouseDown = false;
 
+enum BlendMode
+{
+	BLENDMODE_NONE,
+	BLENDMODE_ALPHA,
+	BLENDMODE_ADDITIVE,
+};
+
 struct ReadFileResult
 {
 	void *Memory;
@@ -43,7 +52,9 @@ struct Pipeline
 	int NumVertexBuffers;
 	SDL_GPUVertexAttribute *VertexAttributes;
 	int NumVertexAttributes;
-	bool Blend;
+	enum BlendMode BlendMode;
+
+	SDL_GPUTextureFormat ColorTargetFormat;
 
 	SDL_GPUGraphicsPipeline *Handle;
 	SDL_Time LastWriteTime;
@@ -111,9 +122,14 @@ static void PipelineSetFormat(struct Pipeline *Pipeline, SDL_GPUVertexBufferDesc
 	Pipeline->NumVertexAttributes = NumVertexAttributes;
 }
 
-static void PipelineSetBlend(struct Pipeline *Pipeline, bool Enable)
+static void PipelineSetBlendMode(struct Pipeline *Pipeline, enum BlendMode BlendMode)
 {
-	Pipeline->Blend = Enable;
+	Pipeline->BlendMode = BlendMode;
+}
+
+static void PipelineSetTargetFormat(struct Pipeline *Pipeline, SDL_GPUTextureFormat Format)
+{
+	Pipeline->ColorTargetFormat = Format;
 }
 
 static SDL_GPUShader *CompileHLSL(SDL_GPUDevice *Device, const char *Source, SDL_ShaderCross_ShaderStage Stage, const char *Entrypoint)
@@ -184,16 +200,18 @@ static SDL_GPUGraphicsPipeline *CreatePipeline(SDL_GPUDevice *Device, SDL_Window
 	if (VertexShader && FragmentShader)
 	{
 		SDL_GPUColorTargetDescription ColorTargetDescription = {
-			.format = SDL_GetGPUSwapchainTextureFormat(Device, Window),
+			.format = (Pipeline->ColorTargetFormat != 0) ? Pipeline->ColorTargetFormat : SDL_GetGPUSwapchainTextureFormat(Device, Window),
 			.blend_state.color_write_mask = 0xF,
 		};
 
-		if (Pipeline->Blend)
+		if (Pipeline->BlendMode != BLENDMODE_NONE)
 		{
 			ColorTargetDescription.blend_state.enable_blend = true;
 			ColorTargetDescription.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-			ColorTargetDescription.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-			ColorTargetDescription.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+			ColorTargetDescription.blend_state.src_color_blendfactor = Pipeline->BlendMode == BLENDMODE_ADDITIVE 
+				? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+			ColorTargetDescription.blend_state.dst_color_blendfactor = Pipeline->BlendMode == BLENDMODE_ADDITIVE 
+				? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
 			ColorTargetDescription.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
 			ColorTargetDescription.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
 			ColorTargetDescription.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -542,19 +560,47 @@ int main(void)
 		return 1;
 	}
 
-	struct Pipeline Pipelines[2] = {0};
+	struct Pipeline Pipelines[5] = {0};
 
 	BeginPipeline();
 	{
 		struct Pipeline *Pipeline = &Pipelines[0];
 
 		PipelineSetShader(Pipeline, "Shaders/BlackHole.hlsl");
+		PipelineSetTargetFormat(Pipeline, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT);
 	}
 	EndPipeline();
 
 	BeginPipeline();
 	{
 		struct Pipeline *Pipeline = &Pipelines[1];
+
+		PipelineSetShader(Pipeline, "Shaders/Downsample.hlsl");
+		PipelineSetTargetFormat(Pipeline, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT);
+	}
+	EndPipeline();
+
+	BeginPipeline();
+	{
+		struct Pipeline *Pipeline = &Pipelines[2];
+
+		PipelineSetShader(Pipeline, "Shaders/Upsample.hlsl");
+		PipelineSetTargetFormat(Pipeline, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT);
+		PipelineSetBlendMode(Pipeline, BLENDMODE_ADDITIVE);
+	}
+	EndPipeline();
+
+	BeginPipeline();
+	{
+		struct Pipeline *Pipeline = &Pipelines[3];
+
+		PipelineSetShader(Pipeline, "Shaders/Composite.hlsl");
+	}
+	EndPipeline();
+
+	BeginPipeline();
+	{
+		struct Pipeline *Pipeline = &Pipelines[4];
 
 		static SDL_GPUVertexBufferDescription VertexBufferDescription = {
 			.slot = 0,
@@ -571,7 +617,7 @@ int main(void)
 
 		PipelineSetShader(Pipeline, "Shaders/UI.hlsl");
 		PipelineSetFormat(Pipeline, &VertexBufferDescription, 1, VertexAttributes, 3);
-		PipelineSetBlend(Pipeline, true);
+		PipelineSetBlendMode(Pipeline, BLENDMODE_ALPHA);
 	}
 	EndPipeline();
 
@@ -606,11 +652,40 @@ int main(void)
 		.size = 16 * MB + 16 * MB,
 	});
 
-	SDL_GPUSampler *UISampler = SDL_CreateGPUSampler(Device, &(SDL_GPUSamplerCreateInfo){
+	SDL_GPUSampler *LinearSampler = SDL_CreateGPUSampler(Device, &(SDL_GPUSamplerCreateInfo){
 		.min_filter = SDL_GPU_FILTER_LINEAR,
 		.mag_filter = SDL_GPU_FILTER_LINEAR,
 	});
 
+    SDL_GPUTexture *SceneTexture = SDL_CreateGPUTexture(Device, &(SDL_GPUTextureCreateInfo){
+        .type = SDL_GPU_TEXTURETYPE_2D,
+        .format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+        .width = 1280, .height = 720,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
+    });
+
+    SDL_GPUTexture *DownsampleTextures[MIPS];
+    {
+    	int W = 1280 / 2, H = 720 / 2;
+
+    	for (int i = 0; i < MIPS; i++)
+    	{
+    		DownsampleTextures[i] = SDL_CreateGPUTexture(Device, &(SDL_GPUTextureCreateInfo){
+	            .type = SDL_GPU_TEXTURETYPE_2D,
+	            .format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+	            .width = W,
+	            .height = H,
+	            .layer_count_or_depth = 1,
+	            .num_levels = 1,
+	            .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        	});
+
+        	W = (W > 1) ? W / 2 : 1;
+       		H = (H > 1) ? H / 2 : 1;
+    	}
+    }
 	MagicPixel = CreateMagicPixel(Device);
 
 	DebugFont = TTF_OpenFont("Assets/DebugFont.ttf", 16.0f);
@@ -733,42 +808,119 @@ int main(void)
 			SDL_EndGPUCopyPass(CopyPass);
 		}
 
-		SDL_GPUColorTargetInfo ColorTarget = {
-			.texture = SwapchainTexture,
-			.clear_color = (SDL_FColor){0.0f, 0.0f, 0.0f, 0.0f},
+		SDL_GPURenderPass *ScenePass = SDL_BeginGPURenderPass(CommandBuffer, &(SDL_GPUColorTargetInfo){
+			.texture = SceneTexture,
+			.clear_color = TRANSPARENT,
 			.load_op = SDL_GPU_LOADOP_CLEAR,
 			.store_op = SDL_GPU_STOREOP_STORE,
-		};
+		}, 1, 0);
 
-		SDL_GPURenderPass *RenderPass = SDL_BeginGPURenderPass(CommandBuffer, &ColorTarget, 1, 0);
-		if (RenderPass)
+		if (ScenePass)
 		{
 			if (Pipelines[0].Handle)
 			{
-				SDL_BindGPUGraphicsPipeline(RenderPass, Pipelines[0].Handle);
-				
-				float Time = (float)SDL_GetTicks() / 1000.0f;
-                SDL_PushGPUVertexUniformData(CommandBuffer, 0, &Time, sizeof(Time));
+				SDL_BindGPUGraphicsPipeline(ScenePass, Pipelines[0].Handle);
 
-				SDL_DrawGPUPrimitives(RenderPass, 3, 1, 0, 0);
+				float Time = (float)SDL_GetTicks() / 1000.0f;
+				SDL_PushGPUVertexUniformData(CommandBuffer, 0, &Time, sizeof(Time));
+
+				SDL_DrawGPUPrimitives(ScenePass, 3, 1, 0, 0);
 			}
 
-			if (Pipelines[1].Handle)
+			SDL_EndGPURenderPass(ScenePass);
+		}
+
+		SDL_GPUTexture *CurrentSource = SceneTexture;
+		for (int i = 0; i < MIPS; i++)
+		{
+			SDL_GPURenderPass *DownsamplePass = SDL_BeginGPURenderPass(CommandBuffer, &(SDL_GPUColorTargetInfo){
+				.texture = DownsampleTextures[i],
+				.clear_color = TRANSPARENT,
+				.load_op = SDL_GPU_LOADOP_CLEAR,
+				.store_op = SDL_GPU_STOREOP_STORE,
+			}, 1, 0);
+
+			if (DownsamplePass)
 			{
-				SDL_BindGPUGraphicsPipeline(RenderPass, Pipelines[1].Handle);
-				SDL_BindGPUVertexBuffers(RenderPass, 0, &(SDL_GPUBufferBinding){
+				if (Pipelines[1].Handle)
+				{
+					SDL_BindGPUGraphicsPipeline(DownsamplePass, Pipelines[1].Handle);
+
+					SDL_BindGPUFragmentSamplers(DownsamplePass, 0, &(SDL_GPUTextureSamplerBinding){
+						.texture = CurrentSource,
+						.sampler = LinearSampler
+					}, 1);
+
+					SDL_DrawGPUPrimitives(DownsamplePass, 3, 1, 0, 0);
+				}
+
+				SDL_EndGPURenderPass(DownsamplePass);
+			}
+
+			CurrentSource = DownsampleTextures[i];
+		}
+
+		for (int i = MIPS - 2; i >= 0; i--) {
+            SDL_GPURenderPass *UpsamplePass = SDL_BeginGPURenderPass(CommandBuffer, &(SDL_GPUColorTargetInfo){
+                .texture = DownsampleTextures[i],
+                .load_op = SDL_GPU_LOADOP_LOAD,
+                .store_op = SDL_GPU_STOREOP_STORE
+            }, 1, 0);
+
+            if (UpsamplePass) {
+                if (Pipelines[2].Handle) {
+                    SDL_BindGPUGraphicsPipeline(UpsamplePass, Pipelines[2].Handle);
+                    
+                    SDL_BindGPUFragmentSamplers(UpsamplePass, 0, &(SDL_GPUTextureSamplerBinding){
+                    	.texture = DownsampleTextures[i+1],
+                    	.sampler = LinearSampler 
+                    }, 1);
+
+                    SDL_DrawGPUPrimitives(UpsamplePass, 3, 1, 0, 0);
+                }
+
+                SDL_EndGPURenderPass(UpsamplePass);
+            }
+        }
+
+		SDL_GPURenderPass *CompositePass = SDL_BeginGPURenderPass(CommandBuffer, &(SDL_GPUColorTargetInfo){
+			.texture = SwapchainTexture,
+			.clear_color = TRANSPARENT,
+			.load_op = SDL_GPU_LOADOP_CLEAR,
+			.store_op = SDL_GPU_STOREOP_STORE,
+		}, 1, 0);
+
+		if (CompositePass)
+		{
+			if (Pipelines[3].Handle)
+			{
+				SDL_BindGPUGraphicsPipeline(CompositePass, Pipelines[3].Handle);
+
+                SDL_GPUTextureSamplerBinding Samplers[2] = {
+                    { .texture = SceneTexture, .sampler = LinearSampler },
+                    { .texture = DownsampleTextures[0], .sampler = LinearSampler }
+                };
+                SDL_BindGPUFragmentSamplers(CompositePass, 0, Samplers, 2);
+
+				SDL_DrawGPUPrimitives(CompositePass, 3, 1, 0, 0);
+			}
+
+			if (Pipelines[4].Handle)
+			{
+				SDL_BindGPUGraphicsPipeline(CompositePass, Pipelines[4].Handle);
+
+				SDL_BindGPUVertexBuffers(CompositePass, 0, &(SDL_GPUBufferBinding){
 					.buffer = UIVertexBuffer,
-					.offset = 0,
+					.offset = 0 
 				}, 1);
-				SDL_BindGPUIndexBuffer(RenderPass, &(SDL_GPUBufferBinding){
+				SDL_BindGPUIndexBuffer(CompositePass, &(SDL_GPUBufferBinding){
 					.buffer = UIIndexBuffer,
-					.offset = 0,
+					.offset = 0 
 				}, SDL_GPU_INDEXELEMENTSIZE_32BIT);
 
-				for (int i = 0; i < DrawCommandCount; i++)
-				{
+				for (int i = 0; i < DrawCommandCount; i++) {
 					struct UIDrawCommand DrawCommand = DrawCommands[i];
-
+					
 					struct Matrix4x4 Uniforms[3] = {
 					    OrthographicMatrix(0.0f, 1280.0f, -720.0f, 0.0f, -1.0f, 1.0f),
 					    TranslationMatrix(Vector3(DrawCommand.X, DrawCommand.Y, 0.0f)),
@@ -776,16 +928,15 @@ int main(void)
 					};
 
 					SDL_PushGPUVertexUniformData(CommandBuffer, 0, Uniforms, sizeof(Uniforms));
-
-					SDL_BindGPUFragmentSamplers(RenderPass, 0, &(SDL_GPUTextureSamplerBinding){
-						.texture = DrawCommand.Texture,
-						.sampler = UISampler,
+					SDL_BindGPUFragmentSamplers(CompositePass, 0, &(SDL_GPUTextureSamplerBinding){ 
+						.texture = DrawCommand.Texture, 
+						.sampler = LinearSampler 
 					}, 1);
-
-					SDL_DrawGPUIndexedPrimitives(RenderPass, DrawCommand.NumIndices, 1, DrawCommand.IndexOffset, DrawCommand.VertexOffset, 0);
+					SDL_DrawGPUIndexedPrimitives(CompositePass, DrawCommand.NumIndices, 1, DrawCommand.IndexOffset, DrawCommand.VertexOffset, 0);
 				}
 			}
-			SDL_EndGPURenderPass(RenderPass);
+
+			SDL_EndGPURenderPass(CompositePass);
 		}
 
 		SDL_SubmitGPUCommandBuffer(CommandBuffer);
