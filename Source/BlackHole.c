@@ -19,12 +19,6 @@ enum BlendMode
 	BLENDMODE_ADDITIVE,
 };
 
-struct ReadFileResult
-{
-	void *Memory;
-	Sint64 MemorySize;
-};
-
 struct Pipeline
 {
 	const char *Shader;
@@ -457,15 +451,18 @@ int main(void)
 			CurrentSource = DownsampleTextures[i];
 		}
 
-		for (int i = MIPS - 2; i >= 0; i--) {
+		for (int i = MIPS - 2; i >= 0; i--)
+		{
             SDL_GPURenderPass *UpsamplePass = SDL_BeginGPURenderPass(CommandBuffer, &(SDL_GPUColorTargetInfo){
                 .texture = DownsampleTextures[i],
                 .load_op = SDL_GPU_LOADOP_LOAD,
                 .store_op = SDL_GPU_STOREOP_STORE
             }, 1, 0);
 
-            if (UpsamplePass) {
-                if (Pipelines[2].Handle) {
+            if (UpsamplePass) 
+            {
+                if (Pipelines[2].Handle) 
+                {
                     SDL_BindGPUGraphicsPipeline(UpsamplePass, Pipelines[2].Handle);
                     
                     SDL_BindGPUFragmentSamplers(UpsamplePass, 0, &(SDL_GPUTextureSamplerBinding){
