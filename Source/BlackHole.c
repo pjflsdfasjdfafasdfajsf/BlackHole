@@ -548,7 +548,7 @@ int main(void)
 	{
 		struct Pipeline *Pipeline = &Pipelines[0];
 
-		PipelineSetShader(Pipeline, "Shaders/Mesh.hlsl");
+		PipelineSetShader(Pipeline, "Shaders/BlackHole.hlsl");
 	}
 	EndPipeline();
 
@@ -746,6 +746,10 @@ int main(void)
 			if (Pipelines[0].Handle)
 			{
 				SDL_BindGPUGraphicsPipeline(RenderPass, Pipelines[0].Handle);
+				
+				float Time = (float)SDL_GetTicks() / 1000.0f;
+                SDL_PushGPUVertexUniformData(CommandBuffer, 0, &Time, sizeof(Time));
+
 				SDL_DrawGPUPrimitives(RenderPass, 3, 1, 0, 0);
 			}
 
