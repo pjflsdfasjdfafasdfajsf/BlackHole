@@ -3,11 +3,22 @@
 
 #include <SDL3/SDL.h>
 
-#define WHITE   (SDL_FColor){ 1, 1, 1, 1 }
-#define BLACK   (SDL_FColor){ 0, 0, 0, 1 }
-#define RED     (SDL_FColor){ 1, 0, 0, 1 }
-#define GREEN   (SDL_FColor){ 0, 1, 0, 1 }
-#define BLUE    (SDL_FColor){ 0, 0, 1, 1 }
+#define CORNERFLAG_TOPLEFT     (1 << 0)
+#define CORNERFLAG_TOPRIGHT    (1 << 1)
+#define CORNERFLAG_BOTTOMRIGHT (1 << 2)
+#define CORNERFLAG_BOTTOMLEFT  (1 << 3)
+#define CORNERFLAG_ALL         (CORNERFLAG_TOPLEFT | CORNERFLAG_TOPRIGHT | CORNERFLAG_BOTTOMRIGHT | CORNERFLAG_BOTTOMLEFT)
+#define CORNERFLAG_TOP         (CORNERFLAG_TOPLEFT | CORNERFLAG_TOPRIGHT)
+#define CORNERFLAG_BOTTOM      (CORNERFLAG_BOTTOMLEFT | CORNERFLAG_BOTTOMRIGHT)
+
+#define TRANSPARENT (SDL_FColor){ 0, 0, 0, 0 }
+#define WHITE       (SDL_FColor){ 0.980f, 0.980f, 0.984f, 1.0f }
+#define GRAY        (SDL_FColor){ 0.922f, 0.922f, 0.929f, 1.0f }
+#define DARKGRAY    (SDL_FColor){ 0.294f, 0.310f, 0.318f, 1.0f }
+#define BLACK       (SDL_FColor){ 0, 0, 0, 1 }
+#define RED         (SDL_FColor){ 1, 0, 0, 1 }
+#define GREEN       (SDL_FColor){ 0, 1, 0, 1 }
+#define BLUE        (SDL_FColor){ 0, 0, 1, 1 }
 
 struct Vector3
 {

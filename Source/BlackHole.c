@@ -23,6 +23,13 @@ static Uint32 *IndexDestination;
 static int Vertices;
 static int Indices;
 
+static const void *HotID = NULL;
+static const void *ActiveID = NULL;
+
+static float MouseX = 0, MouseY = 0;
+static float DragOffsetX = 0, DragOffsetY = 0;
+static bool MouseDown = false;
+
 struct ReadFileResult
 {
 	void *Memory;
@@ -44,11 +51,15 @@ struct Pipeline
 
 struct UIDrawCommand
 {
-	SDL_GPUTexture *Texture;
-	int VertexOffset;
-	int IndexOffset;
-	int NumIndices;
-	float X, Y;
+    SDL_GPUTexture *Texture;
+    int VertexOffset;
+    int IndexOffset;
+    int NumIndices;
+    float X, Y;
+    float W, H;
+    float Radius;
+    float Mode;
+    Uint8 CornerFlags;
 };
 
 static struct UIDrawCommand DrawCommands[256];
@@ -257,17 +268,21 @@ static SDL_GPUTexture *CreateMagicPixel(SDL_GPUDevice *Device)
 	return MagicPixel;
 }
 
-static void DrawPanel(float X, float Y, float W, float H, SDL_FColor Color)
+static void UIBox(float X, float Y, float W, float H, float Radius, Uint8 CornerFlags, SDL_FColor Color)
 {
 	Assert((unsigned int)DrawCommandCount < ArrayCount(DrawCommands));
 	Assert(Vertices + 4 < (int)(16 * MB / sizeof(struct Vertex)));
 
 	DrawCommands[DrawCommandCount++] = (struct UIDrawCommand){
-		.Texture = MagicPixel,
-		.VertexOffset = Vertices,
-		.IndexOffset = Indices,
-		.NumIndices = 6,
-		.X = 0, .Y = 0,
+	    .Texture = MagicPixel,
+	    .VertexOffset = Vertices,
+	    .IndexOffset = Indices,
+	    .NumIndices = 6,
+	    .X = 0, .Y = 0,
+	    .W = W, .H = H,
+	    .Radius = Radius,
+	    .Mode = 1.0f,
+	    .CornerFlags = CornerFlags,
 	};
 
 	VertexDestination[Vertices + 0] = (struct Vertex){ X,     -Y,     0, Color.r, Color.g, Color.b, Color.a, 0, 0 };
@@ -275,18 +290,143 @@ static void DrawPanel(float X, float Y, float W, float H, SDL_FColor Color)
     VertexDestination[Vertices + 2] = (struct Vertex){ X + W, -(Y+H), 0, Color.r, Color.g, Color.b, Color.a, 1, 1 };
     VertexDestination[Vertices + 3] = (struct Vertex){ X,     -(Y+H), 0, Color.r, Color.g, Color.b, Color.a, 0, 1 };
 
-    IndexDestination[Indices + 0] = Vertices + 0;
-    IndexDestination[Indices + 1] = Vertices + 1;
-    IndexDestination[Indices + 2] = Vertices + 2;
-    IndexDestination[Indices + 3] = Vertices + 0;
-    IndexDestination[Indices + 4] = Vertices + 2;
-    IndexDestination[Indices + 5] = Vertices + 3;
+    IndexDestination[Indices + 0] = 0;
+    IndexDestination[Indices + 1] = 1;
+    IndexDestination[Indices + 2] = 2;
+    IndexDestination[Indices + 3] = 0;
+    IndexDestination[Indices + 4] = 2;
+    IndexDestination[Indices + 5] = 3;
 
     Vertices += 4;
     Indices += 6;
 }
 
-static void DrawText(TTF_Font *Font, const char *String, float X, float Y, SDL_FColor Color)
+static bool UIDraggableBox(const void *ID, float X, float Y, float W, float H, 
+    float Radius, Uint8 CornerFlags, SDL_FColor Color,
+    float *DragX, float *DragY)
+{
+    bool Hovered = (MouseX >= X && MouseX <= X + W && MouseY >= Y && MouseY <= Y + H);
+    if (Hovered)
+    {
+        HotID = ID;
+    }
+
+    if (ActiveID == ID)
+    {
+        *DragX = MouseX - DragOffsetX;
+        *DragY = MouseY - DragOffsetY;
+
+        X = *DragX;
+        Y = *DragY;
+
+        HotID = ID;
+
+        if (!MouseDown)
+        {
+            ActiveID = 0;
+        }
+    }
+    else if (HotID == ID)
+    {
+        if (MouseDown)
+        {
+            ActiveID = ID;
+            DragOffsetX = MouseX - X;
+            DragOffsetY = MouseY - Y;
+        }
+    }
+
+    UIBox(X, Y, W, H, Radius, CornerFlags, Color);
+
+    return false;
+}
+
+static void UITriangle(float X, float Y, float W, float H, SDL_FColor Color)
+{
+    Assert((unsigned int)DrawCommandCount < ArrayCount(DrawCommands));
+    Assert(Vertices + 3 < (int)(16 * MB / sizeof(struct Vertex)));
+
+    DrawCommands[DrawCommandCount++] = (struct UIDrawCommand){
+        .Texture = MagicPixel,
+        .VertexOffset = Vertices,
+        .IndexOffset = Indices,
+        .NumIndices = 3,
+        .X = 0, .Y = 0,
+        .W = W, .H = H,
+        .Radius = 0.0f,
+        .Mode = 0.0f,
+        .CornerFlags = 0,
+    };
+
+    float PointY, BaseY;
+    if (H >= 0.0f)
+    {
+        PointY = -Y;
+        BaseY  = -(Y + H);
+    }
+    else
+    {
+        PointY = -(Y - H);
+        BaseY  = -Y;
+    }
+
+    VertexDestination[Vertices + 0] = (struct Vertex){ X + (W * 0.5f), PointY, 0, Color.r, Color.g, Color.b, Color.a, 0.5f, (H >= 0.0f) ? 0.0f : 1.0f };
+    VertexDestination[Vertices + 1] = (struct Vertex){ X + W,          BaseY,  0, Color.r, Color.g, Color.b, Color.a, 1.0f, (H >= 0.0f) ? 1.0f : 0.0f };
+    VertexDestination[Vertices + 2] = (struct Vertex){ X,              BaseY,  0, Color.r, Color.g, Color.b, Color.a, 0.0f, (H >= 0.0f) ? 1.0f : 0.0f };
+
+    IndexDestination[Indices + 0] = 0;
+    IndexDestination[Indices + 1] = 1;
+    IndexDestination[Indices + 2] = 2;
+
+    Vertices += 3;
+    Indices += 3;
+}
+
+static bool UIClickableBox(const void *ID, float X, float Y, float W, float H, float Radius, Uint8 CornerFlags, SDL_FColor Color)
+{
+	bool Result = false;
+
+	bool Hovered = (MouseX >= X && MouseX <= X + W && MouseY >= Y && MouseY <= Y + H);
+	if (Hovered)
+	{
+		HotID = ID;
+	}
+
+	if (ActiveID == ID)
+	{
+		if (!MouseDown)
+		{
+			if (Hovered)
+			{
+				Result = true;
+			}
+
+			ActiveID = 0;
+		}
+	} 
+	else if (HotID == ID)
+	{
+		if (MouseDown)
+		{
+			ActiveID = ID;
+		}
+	}
+
+	if (ActiveID == ID)
+	{
+		Color.r *= 0.5f; Color.g *= 0.5f; Color.b *= 0.5f;
+	}
+	else if (HotID == ID)
+	{
+		Color.r *= 0.8f; Color.g *= 0.8f; Color.b *= 0.8f;
+	}
+
+	UIBox(X, Y, W, H, Radius, CornerFlags, Color);
+
+	return Result;
+}
+
+static void UIText(TTF_Font *Font, const char *String, float X, float Y, SDL_FColor Color)
 {
     TTF_Text *Text = TTF_CreateText(TextEngine, Font, String, 0);
 
@@ -298,13 +438,16 @@ static void DrawText(TTF_Font *Font, const char *String, float X, float Y, SDL_F
         Assert((unsigned int)DrawCommandCount < ArrayCount(DrawCommands));
         Assert(Vertices + Sequence->num_vertices < (int)(16 * MB / sizeof(struct Vertex)));
 
-        DrawCommands[DrawCommandCount++] = (struct UIDrawCommand){
-            .Texture = Sequence->atlas_texture,
-            .VertexOffset = Vertices,
-            .IndexOffset = Indices,
-            .NumIndices = Sequence->num_indices,
-            .X = X, .Y = Y,
-        };
+		DrawCommands[DrawCommandCount++] = (struct UIDrawCommand){
+		    .Texture = Sequence->atlas_texture,
+		    .VertexOffset = Vertices,
+		    .IndexOffset = Indices,
+		    .NumIndices = Sequence->num_indices,
+		    .X = X, .Y = Y,
+		    .W = 0, .H = 0,
+		    .Radius = 0,
+		    .Mode = 0.0f,
+		};
 
         for (int i = 0; i < Sequence->num_vertices; i++)
         {
@@ -329,9 +472,35 @@ static void DrawText(TTF_Font *Font, const char *String, float X, float Y, SDL_F
 
 static void UpdateAndDraw(void)
 {
-	DrawPanel(50, 50, 400, 200, RED);
-	DrawText(DebugFont, "hello", 100, 0, WHITE);
-	DrawText(DebugFont, "HI", 100, -100, WHITE);
+    static bool ShowPanel = false;
+    static float X = 0, Y = 0;
+
+    UIDraggableBox("Header ID", X, Y, 400, 30, 10.0f, CORNERFLAG_TOP, GRAY, &X, &Y);
+    UIText(DebugFont, "Debug", X + 35, -Y - 5, BLACK);
+
+    if (UIClickableBox("Toggle ID", X + 12, Y + 8, 12, 12, 0.0f, 0, TRANSPARENT))
+    {
+        ShowPanel = !ShowPanel;
+    }
+
+    if (ShowPanel) 
+    {
+        UITriangle(X + 12, Y + 8, 12, 12, BLACK);
+    }
+    else 
+    {
+        UITriangle(X + 12, Y + 8, 12, -12, BLACK);
+    }
+
+    if (ShowPanel)
+    {
+        UIBox(X, Y + 25, 400, 200, 10.0f, CORNERFLAG_BOTTOM, WHITE);
+    }
+
+    if (!MouseDown)
+    {
+        ActiveID = 0;
+    }
 }
 
 int main(void)
@@ -444,7 +613,7 @@ int main(void)
 
 	MagicPixel = CreateMagicPixel(Device);
 
-	DebugFont = TTF_OpenFont("Assets/DebugFont.ttf", 64.0f);
+	DebugFont = TTF_OpenFont("Assets/DebugFont.ttf", 16.0f);
 	if (!DebugFont)
 	{
 		SDL_Log("%s", SDL_GetError());
@@ -461,9 +630,35 @@ int main(void)
 
 		while (SDL_PollEvent(&Event))
 		{
-			if (Event.type == SDL_EVENT_QUIT)
+			switch (Event.type)
 			{
-				return 0;
+			case SDL_EVENT_MOUSE_MOTION:
+			{
+				MouseX = Event.motion.x, MouseY = Event.motion.y;
+			}
+			break;
+
+		    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		    {
+		    	if (Event.button.button == SDL_BUTTON_LEFT)
+		    	{
+		    		MouseDown = true;
+		    	}
+		    }
+		    break;
+
+			case SDL_EVENT_MOUSE_BUTTON_UP:
+			{
+				if (Event.button.button == SDL_BUTTON_LEFT)
+				{
+					MouseDown = false;
+				}
+			}
+			break;
+				
+			case SDL_EVENT_QUIT: return 0;
+			
+			default: break;
 			}
 		}
 
@@ -518,8 +713,11 @@ int main(void)
 
 		Vertices = 0, Indices = 0;
 		DrawCommandCount = 0;
+		HotID = 0;
 
 		UpdateAndDraw();
+
+		SDL_UnmapGPUTransferBuffer(Device, UITransferBuffer);
 		
 		if (Vertices > 0)
 		{
@@ -567,9 +765,10 @@ int main(void)
 				{
 					struct UIDrawCommand DrawCommand = DrawCommands[i];
 
-					struct Matrix4x4 Uniforms[2] = {
-						OrthographicMatrix(0.0f, 1280.0f, -720.0f, 0.0f, -1.0f, 1.0f),
-						TranslationMatrix(Vector3(DrawCommand.X, DrawCommand.Y, 1.0f)),
+					struct Matrix4x4 Uniforms[3] = {
+					    OrthographicMatrix(0.0f, 1280.0f, -720.0f, 0.0f, -1.0f, 1.0f),
+					    TranslationMatrix(Vector3(DrawCommand.X, DrawCommand.Y, 0.0f)),
+						{ .m = { { DrawCommand.W, DrawCommand.H, DrawCommand.Radius, DrawCommand.Mode }, { (float)DrawCommand.CornerFlags } } },
 					};
 
 					SDL_PushGPUVertexUniformData(CommandBuffer, 0, Uniforms, sizeof(Uniforms));
