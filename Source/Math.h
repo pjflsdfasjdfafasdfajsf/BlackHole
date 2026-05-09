@@ -1,6 +1,14 @@
 #ifndef MATH_H
 #define MATH_H
 
+#include <SDL3/SDL.h>
+
+#define WHITE   (SDL_FColor){ 1, 1, 1, 1 }
+#define BLACK   (SDL_FColor){ 0, 0, 0, 1 }
+#define RED     (SDL_FColor){ 1, 0, 0, 1 }
+#define GREEN   (SDL_FColor){ 0, 1, 0, 1 }
+#define BLUE    (SDL_FColor){ 0, 0, 1, 1 }
+
 struct Vector3
 {
     float x, y, z;
